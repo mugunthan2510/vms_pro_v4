@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  engine:
+    build: .
+    container_name: vms_pro_engine
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=production
+      - API_PORT=8000
+      - DATABASE_URL=sqlite+aiosqlite:///./data/vms_pro_v4.db
+    volumes:
+      - ./data:/app/data

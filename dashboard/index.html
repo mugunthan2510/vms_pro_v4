@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VMS PRO V4 - Swing Quant Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-sans">
+
+    <!-- Top Navigation Header -->
+    <header class="border-b border-gray-800 bg-gray-900/50 px-6 py-4 flex justify-between items-center">
+        <div>
+            <h1 class="text-xl font-extrabold text-emerald-400 tracking-wider flex items-center gap-2">
+                ⚡ VMS PRO V4 SWING QUANT TERMINAL
+            </h1>
+            <p class="text-xs text-gray-400">Institutional Momentum & Confluence Engine</p>
+        </div>
+        <div class="flex gap-3">
+            <button id="btn-refresh-rankings" onclick="fetchRankings()" class="bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs px-4 py-2 rounded shadow transition-all flex items-center gap-1">
+                🔄 Refresh Rankings
+            </button>
+            <span class="bg-emerald-950 text-emerald-400 border border-emerald-800 text-xs px-3 py-2 rounded flex items-center gap-1 font-mono">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> PURE SWING ENGINE
+            </span>
+        </div>
+    </header>
+
+    <div class="p-6 space-y-6">
+
+        <!-- Top Metrics Bar -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="bg-gray-900/40 border border-gray-800 p-4 rounded">
+                <p class="text-xs text-gray-400 uppercase font-mono">System Mode</p>
+                <p class="text-base font-bold text-emerald-400 font-mono mt-1">SWING (MTF)</p>
+            </div>
+            <div class="bg-gray-900/40 border border-gray-800 p-4 rounded">
+                <p class="text-xs text-gray-400 uppercase font-mono">Engines Loaded</p>
+                <p class="text-base font-bold text-white font-mono mt-1">9 / 9</p>
+            </div>
+            <div class="bg-gray-900/40 border border-gray-800 p-4 rounded">
+                <p class="text-xs text-gray-400 uppercase font-mono">Feed Status</p>
+                <p id="feed-status" class="text-base font-bold text-red-500 font-mono mt-1">DISCONNECTED</p>
+            </div>
+            <div class="bg-gray-900/40 border border-gray-800 p-4 rounded">
+                <p class="text-xs text-gray-400 uppercase font-mono">Ticks Received</p>
+                <p id="ticks-received" class="text-base font-bold text-emerald-400 font-mono mt-1">0</p>
+            </div>
+        </div>
+
+        <!-- Quantitative Swing Rankings Section -->
+        <div class="bg-gray-900/40 border border-gray-800 rounded p-5">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
+                <h2 class="text-base font-bold text-amber-400 tracking-wide flex items-center gap-2 font-mono">
+                    🔥 TOP QUANTITATIVE SWING RANKINGS
+                </h2>
+                
+                <div class="flex items-center gap-4 text-xs">
+                    <span class="text-gray-400 font-mono">Filter:</span>
+                    <button id="filter-btn-all" onclick="setFilter('ALL')" class="filter-btn px-3 py-1 bg-blue-600 text-white rounded font-mono">ALL</button>
+                    <button id="filter-btn-valid" onclick="setFilter('VALID')" class="filter-btn px-3 py-1 bg-gray-800 text-emerald-400 border border-emerald-800/50 rounded font-mono">🎯 VALID TRADES ONLY (≥80)</button>
+                    <button id="filter-btn-watchlist" onclick="setFilter('WATCHLIST')" class="filter-btn px-3 py-1 bg-gray-800 text-amber-400 border border-amber-800/50 rounded font-mono">👀 WATCHLIST (60-79)</button>
+                    <span class="text-gray-500 font-mono ml-4">Last updated: <span id="last-updated" class="text-gray-300">--:--:--</span></span>
+                </div>
+            </div>
+
+            <!-- Table -->
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b border-gray-800 text-xs font-mono text-gray-400 uppercase bg-gray-900/80">
+                            <th class="py-3 px-4">Rank</th>
+                            <th class="py-3 px-4">Symbol</th>
+                            <th class="py-3 px-4">Total Score (Max 100)</th>
+                            <th class="py-3 px-4">Monthly / Weekly Confluence</th>
+                            <th class="py-3 px-4">Swing Signal</th>
+                            <th class="py-3 px-4">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rankings-table-body">
+                        <tr>
+                            <td colspan="6" class="text-center py-8 text-gray-500 font-mono animate-pulse">
+                                Loading VMS PRO Swing Universe Data...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Live Ticks & Signal Console -->
+        <div class="bg-gray-900/40 border border-gray-800 rounded p-5">
+            <h3 class="text-sm font-bold text-emerald-400 font-mono mb-3">Live Ticks & Signal Console</h3>
+            <div id="console-log-box" class="bg-black/80 border border-gray-800 p-4 rounded h-40 overflow-y-auto font-mono text-xs text-emerald-400 space-y-1">
+                <div>> Listening for live market ticks and swing triggers...</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Added timestamp query param to force clean JS load -->
+    <script>
+        document.write('<script src="app.js?v=' + new Date().getTime() + '"><\/script>');
+    </script>
+</body>
+</html>
