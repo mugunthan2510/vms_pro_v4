@@ -4,8 +4,15 @@ import logging
 import threading
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import pyotp
+
+# Fail-safe import for logzero (SmartAPI requirement)
+try:
+    import logzero
+except ImportError:
+    pass
+
 from SmartApi import SmartConnect
 
 # Local module imports
@@ -35,7 +42,7 @@ LATEST_ANALYSIS_RESULTS = {}
 @app.get("/healthz", status_code=200)
 @app.get("/health", status_code=200)
 def health_check():
-    """Lightweight health check endpoint for Render deployment."""
+    """Health check endpoint required for Render deployment."""
     return JSONResponse(
         content={
             "status": "ok",
@@ -50,7 +57,7 @@ def health_check():
 @app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
 def get_dashboard():
-    """Renders basic Dashboard UI to verify server response."""
+    """Renders basic Dashboard UI with live market results."""
     html_content = f"""
     <!DOCTYPE html>
     <html>
