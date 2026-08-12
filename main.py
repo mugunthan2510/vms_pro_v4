@@ -4,7 +4,7 @@ import logging
 import threading
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import pyotp
 from SmartApi import SmartConnect
 
@@ -35,7 +35,7 @@ LATEST_ANALYSIS_RESULTS = {}
 @app.get("/healthz", status_code=200)
 @app.get("/health", status_code=200)
 def health_check():
-    """Health check endpoint required for Render deployment."""
+    """Lightweight health check endpoint for Render deployment."""
     return JSONResponse(
         content={
             "status": "ok",
@@ -195,10 +195,10 @@ def main():
     scanner_thread = threading.Thread(target=run_scanner_bg, daemon=True)
     scanner_thread.start()
 
-    # Step 4: Start FastAPI Web Server on Dynamic Render Port
-    render_port = int(os.getenv("PORT", PORT))
-    logger.info(f"Starting Web Dashboard at http://{HOST}:{render_port}/dashboard")
-    uvicorn.run(app, host=HOST, port=render_port)
+    # Step 4: Start FastAPI Web Server listening on Render PORT (default 10000)
+    server_port = int(os.getenv("PORT", PORT if PORT else 10000))
+    logger.info(f"Starting Web Dashboard on host 0.0.0.0 and port {server_port}")
+    uvicorn.run(app, host="0.0.0.0", port=server_port)
 
 
 if __name__ == "__main__":
