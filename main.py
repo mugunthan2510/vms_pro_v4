@@ -1,245 +1,205 @@
-import io
+import os
 import time
-import asyncio
-import datetime
-import requests
-import warnings
-import pandas as pd
-import numpy as np
-import yfinance as yf
-from typing import List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
+import logging
+import threading
+import uvicorn
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+import pyotp
+from SmartApi import SmartConnect
 
-warnings.filterwarnings('ignore')
-
-# Config
-MAX_THREADS = 8
-RANKINGS_CACHE: List[Dict[str, Any]] = []
-LAST_UPDATED_TIME: str = "--:--:--"
-
-CORE_LIQUID_UNIVERSE = [
-    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
-    "BHARTIARTL.NS", "SBIN.NS", "LTIM.NS", "LT.NS", "HINDUNILVR.NS",
-    "AXISBANK.NS", "KOTAKBANK.NS", "M&M.NS", "TATAMOTORS.NS", "SUNPHARMA.NS",
-    "NTPC.NS", "TITAN.NS", "MARUTI.NS", "BAJFINANCE.NS", "TATASTEEL.NS",
-    "POWERGRID.NS", "ADANIENT.NS", "ASIANPAINT.NS", "COALINDIA.NS", "JSWSTEEL.NS",
-    "ADANIPORTS.NS", "HCLTECH.NS", "ULTRACEMCO.NS", "ONGC.NS", "GRASIM.NS",
-    "TECHM.NS", "CIPLA.NS", "HEROMOTOCO.NS", "WIPRO.NS", "DLF.NS"
-]
-
-app = FastAPI(title="VMS PRO v4.0 Quant Terminal")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Local module imports
+from config.settings import (
+    SMARTAPI_KEY,
+    SMARTAPI_CLIENT,
+    SMARTAPI_PIN,
+    SMARTAPI_TOTP,
+    WATCHLIST,
+    HOST,
+    PORT
 )
+from broker.smart_stream import SmartStreamManager
+from engines.rs.engine import RelativeStrengthEngine
 
-try:
-    app.mount("/dashboard", StaticFiles(directory="dashboard", html=True), name="dashboard")
-except Exception as e:
-    print(f"Mount note: {e}")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("VMS_PRO_MAIN")
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
+# Initialize FastAPI App
+app = FastAPI(title="VMS PRO V4 Dashboard")
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
+# Global Cache for RS Engine Results
+LATEST_ANALYSIS_RESULTS = {}
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
 
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception:
-                pass
-
-manager = ConnectionManager()
-
-def evaluate_stock_vms(symbol: str, nifty_close: pd.Series) -> Dict[str, Any]:
-    try:
-        # Download individual ticker data freshly
-        ticker_df = yf.Ticker(symbol).history(period="1y", interval="1d")
-        
-        if ticker_df is None or ticker_df.empty or len(ticker_df) < 50:
-            return None
-
-        clean_df = ticker_df.copy()
-        
-        close_price = clean_df['Close']
-        latest_close = float(close_price.iloc[-1])
-        
-        if pd.isna(latest_close) or latest_close < 10:
-            return None
-
-        # Technical Calculations
-        clean_df['20_SMA'] = close_price.rolling(20).mean()
-        clean_df['50_SMA'] = close_price.rolling(50).mean()
-        clean_df['200_SMA'] = close_price.rolling(200).mean()
-        clean_df['Vol_20SMA'] = clean_df['Volume'].rolling(20).mean()
-
-        high_low = clean_df['High'] - clean_df['Low']
-        high_close = (clean_df['High'] - close_price.shift()).abs()
-        low_close = (clean_df['Low'] - close_price.shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        clean_df['ATR'] = tr.rolling(14).mean()
-
-        # Relative Strength Calculation vs Nifty 50
-        if nifty_close is not None and not nifty_close.empty:
-            stock_ret = close_price.pct_change(21)
-            index_ret = nifty_close.pct_change(21)
-            clean_df['RS'] = stock_ret - index_ret
-            clean_df['RS_Rank'] = clean_df['RS'].rolling(100).rank(pct=True) * 100
-        else:
-            clean_df['RS_Rank'] = 50
-
-        # Monthly & Weekly Pivot Calculations (Last Month High/Low/Close)
-        monthly_df = clean_df['Close'].resample('ME').ohlc() if hasattr(pd, 'date_range') else clean_df['Close'].resample('M').ohlc()
-        if len(monthly_df) >= 2:
-            prev_month = monthly_df.iloc[-2]
-            monthly_pivot = (prev_month['high'] + prev_month['low'] + prev_month['close']) / 3.0
-        else:
-            monthly_pivot = latest_close
-
-        weekly_df = clean_df['Close'].resample('W').ohlc()
-        if len(weekly_df) >= 2:
-            prev_week = weekly_df.iloc[-2]
-            weekly_pivot = (prev_week['high'] + prev_week['low'] + prev_week['close']) / 3.0
-        else:
-            weekly_pivot = monthly_pivot * 0.99
-
-        latest = clean_df.iloc[-1]
-
-        c1 = float(latest['Close']) > monthly_pivot
-        c2 = float(latest['Close']) > float(latest['20_SMA'])
-        c3 = float(latest['20_SMA']) > float(latest['50_SMA'])
-        c4 = float(latest['Close']) > float(latest['200_SMA'])
-        c5 = float(latest['Volume']) > (1.0 * float(latest['Vol_20SMA']))
-        c6 = float(latest['RS_Rank']) >= 50
-
-        score = int(round(sum([c1, c2, c3, c4, c5, c6]) * 16.66))
-
-        clean_symbol = symbol.replace(".NS", "")
-        current_price = round(latest_close, 2)
-        m_pivot = round(monthly_pivot, 2)
-        w_pivot = round(weekly_pivot, 2)
-        rs_rank = int(round(float(latest['RS_Rank']))) if not pd.isna(latest['RS_Rank']) else 50
-
-        if score >= 80:
-            signal = "VALID TRADE"
-        elif score >= 60:
-            signal = "WATCHLIST"
-        else:
-            signal = "NO TRADE"
-
-        return {
-            "symbol": clean_symbol,
-            "score": score,
-            "total_score": score,
-            "monthly_pivot": f"Monthly: ₹{m_pivot} | W-Pivot: ₹{w_pivot}",
-            "m_pivot": m_pivot,
-            "w_pivot": w_pivot,
-            "signal": signal,
-            "swing_signal": f"{signal} | RS PERCENTILE: {rs_rank}%",
-            "rs_rank": rs_rank,
-            "price": current_price,
-            "atr": round(float(latest['ATR']), 2) if not pd.isna(latest['ATR']) else 10.0
+# --- HEALTH CHECK ENDPOINTS FOR RENDER ---
+@app.get("/healthz", status_code=200)
+@app.get("/health", status_code=200)
+def health_check():
+    """Health check endpoint required for Render deployment."""
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "service": "VMS PRO V4 Quant Engine",
+            "watchlist_count": len(WATCHLIST),
+            "cached_results": len(LATEST_ANALYSIS_RESULTS)
         }
-    except Exception as e:
-        print(f"Error evaluating {symbol}: {e}")
-        return None
+    )
 
-def run_vms_pro_scan():
-    global RANKINGS_CACHE, LAST_UPDATED_TIME
-    print("⏳ Executing Quant Scan Engine...")
+
+# --- DASHBOARD UI ENDPOINTS ---
+@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse)
+def get_dashboard():
+    """Renders basic Dashboard UI to verify server response."""
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>VMS PRO V4 - Live Dashboard</title>
+        <meta http-equiv="refresh" content="10">
+        <style>
+            body {{ font-family: Arial, sans-serif; background-color: #0f172a; color: #f8fafc; padding: 20px; }}
+            h1 {{ color: #38bdf8; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; background-color: #1e293b; }}
+            th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #334155; }}
+            th {{ background-color: #0284c7; color: white; }}
+            tr:hover {{ background-color: #334155; }}
+            .badge {{ background-color: #16a34a; padding: 4px 8px; border-radius: 4px; font-weight: bold; }}
+            .no-data {{ color: #f59e0b; padding: 15px; font-style: italic; text-align: center; }}
+        </style>
+    </head>
+    <body>
+        <h1>🚀 VMS PRO V4 - Live Market Dashboard</h1>
+        <p>Status: <span class="badge">ACTIVE STREAMING</span> | Total Tracked Stocks: {len(WATCHLIST)}</p>
+        
+        <h2>Top Relative Strength Leaders</h2>
+        <table>
+            <tr>
+                <th>Symbol</th>
+                <th>RS Score</th>
+                <th>RS Percentile</th>
+            </tr>
+    """
     
+    if LATEST_ANALYSIS_RESULTS:
+        sorted_stocks = sorted(
+            LATEST_ANALYSIS_RESULTS.items(), 
+            key=lambda item: item[1].get("rs_percentile", 0) if isinstance(item[1], dict) else 0, 
+            reverse=True
+        )
+        
+        for symbol, metrics in sorted_stocks[:20]:
+            rs_score = metrics.get('rs_score', 0) if isinstance(metrics, dict) else 0
+            rs_pct = metrics.get('rs_percentile', 0) if isinstance(metrics, dict) else 0
+            html_content += f"""
+                <tr>
+                    <td><b>{symbol}</b></td>
+                    <td>{rs_score:.2f}</td>
+                    <td>{rs_pct:.2f}%</td>
+                </tr>
+            """
+    else:
+        html_content += """
+            <tr>
+                <td colspan="3" class="no-data">⏳ Relative Strength calculation in progress... Table will refresh automatically.</td>
+            </tr>
+        """
+        
+    html_content += """
+        </table>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+
+def generate_totp_token(totp_secret: str) -> str:
+    """Generates time-based 6-digit OTP for SmartAPI authentication."""
+    if not totp_secret:
+        raise ValueError("SMARTAPI_TOTP secret is not provided in environment variables.")
+    return pyotp.TOTP(totp_secret).now()
+
+
+def initialize_smart_api_session():
+    """Logs into Angel One SmartAPI and returns auth_token and feed_token."""
+    logger.info("Initializing Angel One SmartAPI Session...")
+    
+    if not SMARTAPI_KEY or not SMARTAPI_CLIENT or not SMARTAPI_TOTP:
+        logger.error("Missing critical environment variables: SMARTAPI_KEY, SMARTAPI_CLIENT, or SMARTAPI_TOTP")
+        return None, None
+
     try:
-        nifty_data = yf.Ticker("^NSEI").history(period="1y", interval="1d")
-        nifty_close = nifty_data['Close'] if not nifty_data.empty else None
+        smart_conn = SmartConnect(api_key=SMARTAPI_KEY)
+        totp = generate_totp_token(SMARTAPI_TOTP)
+        
+        session_data = smart_conn.generateSession(SMARTAPI_CLIENT, SMARTAPI_PIN, totp)
+        
+        if not session_data.get("status"):
+            logger.error(f"SmartAPI Authentication Failed: {session_data}")
+            return None, None
+
+        auth_token = session_data["data"]["jwtToken"]
+        feed_token = smart_conn.getfeedToken()
+        
+        logger.info("SmartAPI Session Authenticated Successfully.")
+        return auth_token, feed_token
+
     except Exception as e:
-        print(f"Nifty fetch warning: {e}")
-        nifty_close = None
+        logger.error(f"Exception during SmartAPI login: {e}")
+        return None, None
 
-    evaluated_list = []
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = {executor.submit(evaluate_stock_vms, sym, nifty_close): sym for sym in CORE_LIQUID_UNIVERSE}
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                evaluated_list.append(res)
 
-    evaluated_list.sort(key=lambda x: x['score'], reverse=True)
-    for idx, item in enumerate(evaluated_list, 1):
-        item['rank'] = idx
+def start_websocket_bg(auth_token, feed_token):
+    """Runs WebSocket connection in a background thread."""
+    try:
+        stream_manager = SmartStreamManager()
+        stream_manager.start_stream(auth_token, feed_token)
+    except Exception as e:
+        logger.error(f"WebSocket Thread Exception: {e}")
 
-    RANKINGS_CACHE = evaluated_list
-    LAST_UPDATED_TIME = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"✅ Updated rankings cache with {len(RANKINGS_CACHE)} evaluated stocks at {LAST_UPDATED_TIME}.")
 
-async def background_scanner_loop():
+def run_scanner_bg():
+    """Runs Relative Strength engine periodically in background with fail-safe error handling."""
+    global LATEST_ANALYSIS_RESULTS
+    rs_engine = RelativeStrengthEngine(benchmark_symbol="^NSEI")
+    
     while True:
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, run_vms_pro_scan)
-            await manager.broadcast({
-                "type": "log", 
-                "message": f"[SYS] Swing Rankings updated successfully. ({len(RANKINGS_CACHE)} stocks evaluated)"
-            })
+            logger.info("Executing Quant Scan Engine...")
+            results = rs_engine.evaluate_universe(symbols=None)
+            if results:
+                LATEST_ANALYSIS_RESULTS = results
+                logger.info(f"RS Scan completed. {len(LATEST_ANALYSIS_RESULTS)} stocks updated in cache.")
+            else:
+                logger.warning("RS Scan returned empty results. Retaining existing cache.")
         except Exception as e:
-            print(f"⚠️ Scanner Loop Exception: {e}")
-        await asyncio.sleep(600)
+            logger.error(f"Error during RS background scan: {e}")
+        time.sleep(300)  # Re-scan every 5 minutes
 
-@app.on_event("startup")
-async def startup_event():
-    print("🚀 Initializing VMS PRO V4 Core Trading System...")
-    asyncio.create_task(background_scanner_loop())
 
-@app.get("/api/rankings")
-def get_rankings():
-    if len(RANKINGS_CACHE) == 0:
-        run_vms_pro_scan()
-    return JSONResponse({
-        "status": "success",
-        "last_updated": LAST_UPDATED_TIME,
-        "total_evaluated": len(RANKINGS_CACHE),
-        "rankings": RANKINGS_CACHE,
-        "data": RANKINGS_CACHE
-    })
+def main():
+    logger.info("==========================================")
+    logger.info("  STARTING VMS PRO V4 WEB & QUANT ENGINE")
+    logger.info("==========================================")
 
-@app.get("/api/scan")
-def trigger_manual_scan():
-    run_vms_pro_scan()
-    return JSONResponse({
-        "status": "success",
-        "message": f"Scan complete! {len(RANKINGS_CACHE)} stocks loaded.",
-        "rankings": RANKINGS_CACHE
-    })
+    # Step 1: Authenticate SmartAPI
+    auth_token, feed_token = initialize_smart_api_session()
 
-@app.websocket("/ws/live-ticks")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        await websocket.send_json({"type": "status", "feed": "CONNECTED", "engines": "9 / 9"})
-        while True:
-            await asyncio.sleep(10)
-            await websocket.send_json({"type": "ping", "time": datetime.datetime.now().strftime("%H:%M:%S")})
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception:
-        manager.disconnect(websocket)
+    # Step 2: Start WebSocket Stream in Background Thread
+    if auth_token and feed_token:
+        logger.info("Starting SmartAPI WebSocket live feed in background thread...")
+        ws_thread = threading.Thread(target=start_websocket_bg, args=(auth_token, feed_token), daemon=True)
+        ws_thread.start()
+
+    # Step 3: Start Relative Strength Scanner in Background Thread
+    scanner_thread = threading.Thread(target=run_scanner_bg, daemon=True)
+    scanner_thread.start()
+
+    # Step 4: Start FastAPI Web Server on Dynamic Render Port
+    render_port = int(os.getenv("PORT", PORT))
+    logger.info(f"Starting Web Dashboard at http://{HOST}:{render_port}/dashboard")
+    uvicorn.run(app, host=HOST, port=render_port)
+
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    main()
